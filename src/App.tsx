@@ -1,19 +1,164 @@
 import { useEffect, useMemo, useState } from 'react';
 import { buildRanking, championBase, laneGroups, refreshMeta, type ChampionMeta } from './data/meta';
 
+const getNestedValue = (source: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && value !== null) return value;
+  }
+
+  return undefined;
+};
+
+const normalizeTier = (value: unknown): ChampionMeta['tier'] => {
+  const text = String(value ?? 'A').toUpperCase().replace(/\s+/g, '');
+
+  if (text.includes('S+')) return 'S+';
+  if (text.includes('S')) return 'S';
+  if (text.includes('A+')) return 'A+';
+  return 'A';
+};
+
+const normalizeDifficulty = (value: unknown): ChampionMeta['difficulty'] => {
+  const text = String(value ?? 'Média').toLowerCase();
+
+  if (text.includes('facil')) return 'Fácil';
+  if (text.includes('dificil')) return 'Difícil';
+  return 'Média';
+};
+
+const normalizeLane = (value: unknown): ChampionMeta['lane'] => {
+  const text = String(value ?? 'EXP').toLowerCase();
+
+  if (text.includes('gold')) return 'Gold Lane';
+  if (text.includes('jungle')) return 'Jungle';
+  if (text.includes('mid')) return 'Mid';
+  if (text.includes('roam')) return 'Roam';
+  if (text.includes('support')) return 'Support';
+  return 'EXP';
+};
+
+const normalizeStringArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry ?? '').trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/[|,]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const normalizeNumber = (value: unknown, fallback: number) => {
+  const raw = String(value ?? '').replace(/[%]/g, '').replace(/,/g, '');
+  const numberValue = Number(raw);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+};
+
+const fetchMetaData = async (): Promise<ChampionMeta[]> => {
+  try {
+    const response = await fetch('/api/heroes', { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`API responded with status ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const rawList = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.heroes)
+          ? payload.heroes
+          : Array.isArray(payload?.results)
+            ? payload.results
+            : [];
+
+    if (!rawList.length) {
+      return championBase;
+    }
+
+    return rawList.map((item: Record<string, unknown>, index: number) => {
+      const name = String(
+        getNestedValue(item, ['name', 'hero_name', 'displayName', 'title', 'heroName']) ?? `Champion ${index + 1}`,
+      );
+      const lane = normalizeLane(
+        getNestedValue(item, ['lane', 'role', 'role_name', 'roleName', 'line', 'position', 'position_name']),
+      );
+
+      return {
+        id: String(
+          getNestedValue(item, ['id', 'hero_id', 'slug', 'key']) ?? name,
+        )
+          .toLowerCase()
+          .replace(/\s+/g, '-'),
+        name,
+        lane,
+        role: String(getNestedValue(item, ['role', 'role_name', 'roleName', 'type']) ?? 'Fighter'),
+        tier: normalizeTier(getNestedValue(item, ['tier', 'rank', 'meta_tier', 'metaTier'])),
+        difficulty: normalizeDifficulty(getNestedValue(item, ['difficulty', 'complexity', 'hardness'])),
+        winRate: normalizeNumber(getNestedValue(item, ['win_rate', 'winRate', 'winRatePct', 'winrate']), 50),
+        pickRate: normalizeNumber(getNestedValue(item, ['pick_rate', 'pickRate', 'pickRatePct', 'pickrate']), 20),
+        banRate: normalizeNumber(getNestedValue(item, ['ban_rate', 'banRate', 'banRatePct', 'banrate']), 10),
+        build: normalizeStringArray(getNestedValue(item, ['build', 'bestBuild', 'recommendedBuild', 'recommended_build'])),
+        runes: normalizeStringArray(
+          getNestedValue(item, ['runes', 'runeBuild', 'emblems', 'recommendedRunes', 'recommended_runes']),
+        ),
+        items: normalizeStringArray(
+          getNestedValue(item, ['items', 'itemBuild', 'bestItems', 'recommendedItems', 'recommended_items']),
+        ),
+        counters: normalizeStringArray(getNestedValue(item, ['counters', 'strongAgainst', 'strong_against'])),
+        counteredBy: normalizeStringArray(
+          getNestedValue(item, ['counteredBy', 'weakAgainst', 'weak_against', 'countered_by']),
+        ),
+        notes: String(
+          getNestedValue(item, ['notes', 'description', 'summary', 'meta_note', 'metaNote']) ??
+            'Dados carregados da API com atualização contínua.',
+        ),
+      };
+    });
+  } catch (error) {
+    console.warn('Erro ao buscar dados da API. Usando fallback local.', error);
+    return championBase;
+  }
+};
+
 function App() {
   const [meta, setMeta] = useState<ChampionMeta[]>(() => championBase);
   const [selectedLane, setSelectedLane] = useState<(typeof laneGroups)[number]>('All');
   const [search, setSearch] = useState('');
   const [lastUpdated, setLastUpdated] = useState(new Date());
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true;
+
+    const loadData = async () => {
+      setLoading(true);
+      const data = await fetchMetaData();
+      if (isMounted) {
+        setMeta(data);
+        setLastUpdated(new Date());
+        setLoading(false);
+      }
+    };
+
+    loadData();
+
     const timer = setInterval(() => {
       setMeta((current) => refreshMeta(current));
       setLastUpdated(new Date());
-    }, 10000);
+    }, 12000);
 
-    return () => clearInterval(timer);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
   }, []);
 
   const filteredChampions = useMemo(() => {
@@ -51,7 +196,7 @@ function App() {
         </div>
         <div className="status-pill">
           <span className="dot" />
-          Atualizado: {lastUpdated.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+          {loading ? 'Carregando dados...' : `Atualizado: ${lastUpdated.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
         </div>
       </header>
 
@@ -60,9 +205,8 @@ function App() {
           <p className="hero-tag">Atualização automática</p>
           <h2>Veja os campeões mais fortes do meta, lane por lane, com build e runas sugeridas.</h2>
           <p>
-            Sem uma API oficial do jogo, esta versão usa uma base de dados curada e atualização automática por refresh
-            periódico para simular a meta semanal. Quando houver uma API confiável, o mesmo painel pode ser conectado
-            diretamente a ela.
+            Os dados podem vir de uma API externa ou cair em fallback local. Assim o site continua funcionando mesmo
+            que a fonte externa esteja indisponível.
           </p>
         </div>
 
